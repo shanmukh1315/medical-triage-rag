@@ -29,6 +29,18 @@ index = faiss.read_index(INDEX_PATH)
 
 embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
+def _clean(x) -> str:
+    """Convert None/NaN to empty string and ensure it's a plain str."""
+    if x is None:
+        return ""
+    try:
+        # pandas may give NaN floats
+        if isinstance(x, float) and np.isnan(x):
+            return ""
+    except Exception:
+        pass
+    return str(x)
+
 def _embed(text: str) -> np.ndarray:
     v = embedder.encode([text], convert_to_numpy=True).astype("float32")
     faiss.normalize_L2(v)
@@ -43,12 +55,12 @@ def retrieve(query: str, k: int = TOP_K):
         hits.append({
             "rank": rank,
             "score": float(scores[0][rank-1]),
-            "question": r.get("question",""),
-            "answer": r.get("answer",""),
-            "question_type": r.get("question_type",""),
-            "question_focus": r.get("question_focus",""),
-            "source": r.get("document_source",""),
-            "url": r.get("document_url",""),
+            "question": _clean(r.get("question")),
+            "answer": _clean(r.get("answer")),  # ✅ never None
+            "question_type": _clean(r.get("question_type")),
+            "question_focus": _clean(r.get("question_focus")),
+            "source": _clean(r.get("document_source")) or "Unknown source",
+            "url": _clean(r.get("document_url")),
         })
     return hits
 
@@ -67,9 +79,9 @@ def format_citations_and_passages(hits):
     passages_md = []
     for h in hits:
         citations_md.append(f"[{h['rank']}] **{h['source']}** — {h['url']}")
-        snippet = (h["answer"] or "")[:900].replace("\n", " ")
+        snippet = (_clean(h.get("answer"))[:900]).replace("\n", " ")
         passages_md.append(
-            f"### [{h['rank']}] {h['question_type']} — {h['question']}\n"
+            f"### [{h['rank']}] {h.get('question_type','')} — {h.get('question','')}\n"
             f"{snippet}..."
         )
     return "\n".join(citations_md), "\n\n".join(passages_md)
@@ -77,8 +89,11 @@ def format_citations_and_passages(hits):
 def generate_answer(user_q: str, hits):
     sources_block = ""
     for h in hits:
-        sources_block += f"[{h['rank']}] {h['source']} — {h['url']}\n"
-        sources_block += (h["answer"][:1200] + "\n\n")
+        ans = _clean(h.get("answer"))  # ✅ safe
+        src = _clean(h.get("source")) or "Unknown source"
+        url = _clean(h.get("url"))
+        sources_block += f"[{h['rank']}] {src} — {url}\n"
+        sources_block += (ans[:1200] + "\n\n")
 
     prompt = (
         f"{SYS_RULES}\n\n"
@@ -91,14 +106,22 @@ def generate_answer(user_q: str, hits):
     token = os.getenv("HF_TOKEN")
     client = InferenceClient(model=MODEL_ID, token=token)
 
-    out = client.text_generation(
-        prompt,
-        max_new_tokens=230,
-        temperature=0.3,
-        top_p=0.9,
-        return_full_text=False
-    )
-    return out
+    try:
+        out = client.text_generation(
+            prompt,
+            max_new_tokens=230,
+            temperature=0.3,
+            top_p=0.9,
+            return_full_text=False
+        )
+        return out
+    except Exception as e:
+        # ✅ Don't crash the app; show a friendly message
+        return (
+            f"⚠️ I couldn’t generate a response right now due to a model/API error ({type(e).__name__}).\n\n"
+            "Try again in a moment. The retrieval/citations below still show relevant sources.\n\n"
+            f"{DISCLAIMER}"
+        )
 
 def log_feedback(kind: str, user_q: str, answer: str, hits):
     rec = {
@@ -121,7 +144,10 @@ with gr.Blocks(title="Medical Q&A + RAG + Triage") as demo:
     with gr.Tabs():
         with gr.Tab("Chat"):
             chat = gr.Chatbot(height=360)
-            user_q = gr.Textbox(label="Ask a medical question (informational)", placeholder="Example: cough and mild fever for 3 days...")
+            user_q = gr.Textbox(
+                label="Ask a medical question (informational)",
+                placeholder="Example: cough and mild fever for 3 days..."
+            )
             triage = gr.Markdown()
 
             with gr.Accordion("Citations", open=True):
@@ -140,10 +166,15 @@ with gr.Blocks(title="Medical Q&A + RAG + Triage") as demo:
             fb_status = gr.Markdown()
 
             def on_send(history, q):
+                q = (q or "").strip()
+                if not q:
+                    return history, "", "", "", {"q":"", "a":"", "hits":[]}
+
                 hits = retrieve(q, TOP_K)
                 tri = triage_hint(q)
                 c_md, p_md = format_citations_and_passages(hits)
                 ans = generate_answer(q, hits)
+
                 history = history + [(q, ans)]
                 st = {"q": q, "a": ans, "hits": hits}
                 return history, tri, c_md, p_md, st
@@ -157,9 +188,9 @@ with gr.Blocks(title="Medical Q&A + RAG + Triage") as demo:
             btn_clear.click(on_clear, outputs=[chat, triage, citations, passages, state_last])
 
             def on_fb(kind, st):
-                if not st["q"]:
+                if not st.get("q"):
                     return "Ask a question first."
-                return log_feedback(kind, st["q"], st["a"], st["hits"])
+                return log_feedback(kind, st["q"], st.get("a",""), st.get("hits",[]))
 
             fb_up.click(lambda st: on_fb("helpful", st), inputs=[state_last], outputs=[fb_status])
             fb_down.click(lambda st: on_fb("not_helpful", st), inputs=[state_last], outputs=[fb_status])
@@ -169,7 +200,7 @@ with gr.Blocks(title="Medical Q&A + RAG + Triage") as demo:
             gr.Markdown("## MedQuAD Explorer (quick demo view)")
             qtype = gr.Dropdown(
                 label="Filter by question_type (optional)",
-                choices=sorted(df["question_type"].dropna().unique().tolist())
+                choices=sorted([x for x in df["question_type"].dropna().unique().tolist() if str(x).strip() != ""])
             )
             keyword = gr.Textbox(label="Search keyword", placeholder="e.g., diabetes, fever, asthma")
             btn_find = gr.Button("Search")
