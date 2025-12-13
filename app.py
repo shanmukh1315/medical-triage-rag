@@ -233,4 +233,9 @@ with gr.Blocks(title="Medical Q&A + RAG + Triage") as demo:
 
             btn_find.click(do_search, inputs=[qtype, keyword], outputs=[table, status])
 
-demo.launch()
+try:
+    demo.launch(ssr_mode=False)
+except TypeError:
+    # If your Gradio version doesn't support ssr_mode
+    demo.launch()
+
