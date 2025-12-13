@@ -115,7 +115,6 @@ def generate_answer(user_q: str, hits):
         )
         return out
     except Exception as e:
-        # ✅ Don't crash the app; show a friendly message
         return (
             f"⚠️ I couldn’t generate a response right now due to a model/API error ({type(e).__name__}).\n\n"
             "Try again in a moment. The retrieval/citations below still show relevant sources.\n\n"
@@ -142,8 +141,8 @@ with gr.Blocks(title="Medical Q&A + RAG + Triage") as demo:
 
     with gr.Tabs():
         with gr.Tab("Chat"):
-            # ✅ IMPORTANT: messages format
-            chat = gr.Chatbot(height=360, type="messages")
+            # ✅ IMPORTANT: no 'type=' param (your Gradio doesn't support it)
+            chat = gr.Chatbot(height=360)
 
             user_q = gr.Textbox(
                 label="Ask a medical question (informational)",
@@ -176,7 +175,7 @@ with gr.Blocks(title="Medical Q&A + RAG + Triage") as demo:
                 c_md, p_md = format_citations_and_passages(hits)
                 ans = generate_answer(q, hits)
 
-                # ✅ messages-format history
+                # ✅ messages-format history without needing Chatbot(type="messages")
                 if history is None:
                     history = []
                 history = history + [
