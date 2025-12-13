@@ -11,7 +11,7 @@ INDEX_PATH = "assets/medquad.index"
 META_PATH  = "assets/medquad_meta.parquet"
 TOP_K = 4
 
-MODEL_ID = "ruslanmv/Medical-Llama3-8B"  # remote inference
+MODEL_ID = "ruslanmv/Medical-Llama3-8B"  # remote inference (hosted)
 DISCLAIMER = "Disclaimer: This is not medical advice. If you're worried or symptoms are severe, seek professional care."
 
 SYS_RULES = (
@@ -34,7 +34,6 @@ def _clean(x) -> str:
     if x is None:
         return ""
     try:
-        # pandas may give NaN floats
         if isinstance(x, float) and np.isnan(x):
             return ""
     except Exception:
@@ -89,7 +88,7 @@ def format_citations_and_passages(hits):
 def generate_answer(user_q: str, hits):
     sources_block = ""
     for h in hits:
-        ans = _clean(h.get("answer"))  # ✅ safe
+        ans = _clean(h.get("answer"))
         src = _clean(h.get("source")) or "Unknown source"
         url = _clean(h.get("url"))
         sources_block += f"[{h['rank']}] {src} — {url}\n"
@@ -143,7 +142,9 @@ with gr.Blocks(title="Medical Q&A + RAG + Triage") as demo:
 
     with gr.Tabs():
         with gr.Tab("Chat"):
-            chat = gr.Chatbot(height=360)
+            # ✅ IMPORTANT: messages format
+            chat = gr.Chatbot(height=360, type="messages")
+
             user_q = gr.Textbox(
                 label="Ask a medical question (informational)",
                 placeholder="Example: cough and mild fever for 3 days..."
@@ -175,7 +176,14 @@ with gr.Blocks(title="Medical Q&A + RAG + Triage") as demo:
                 c_md, p_md = format_citations_and_passages(hits)
                 ans = generate_answer(q, hits)
 
-                history = history + [(q, ans)]
+                # ✅ messages-format history
+                if history is None:
+                    history = []
+                history = history + [
+                    {"role": "user", "content": q},
+                    {"role": "assistant", "content": ans}
+                ]
+
                 st = {"q": q, "a": ans, "hits": hits}
                 return history, tri, c_md, p_md, st
 
