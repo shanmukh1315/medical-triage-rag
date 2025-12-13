@@ -1,0 +1,7 @@
+gradio
+pandas
+pyarrow
+numpy
+faiss-cpu
+sentence-transformers
+huggingface_hub
