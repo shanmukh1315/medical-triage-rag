@@ -160,3 +160,39 @@ with gr.Blocks(title="Medical Q&A + RAG + Triage") as demo:
                 if not st["q"]:
                     return "Ask a question first."
                 return log_feedback(kind, st["q"], st["a"], st["hits"])
+
+            fb_up.click(lambda st: on_fb("helpful", st), inputs=[state_last], outputs=[fb_status])
+            fb_down.click(lambda st: on_fb("not_helpful", st), inputs=[state_last], outputs=[fb_status])
+            fb_wrong.click(lambda st: on_fb("wrong_citation", st), inputs=[state_last], outputs=[fb_status])
+
+        with gr.Tab("Dataset Explorer"):
+            gr.Markdown("## MedQuAD Explorer (quick demo view)")
+            qtype = gr.Dropdown(
+                label="Filter by question_type (optional)",
+                choices=sorted(df["question_type"].dropna().unique().tolist())
+            )
+            keyword = gr.Textbox(label="Search keyword", placeholder="e.g., diabetes, fever, asthma")
+            btn_find = gr.Button("Search")
+
+            table = gr.Dataframe(headers=["question_type","question_focus","question","url"], interactive=False, wrap=True)
+            status = gr.Markdown()
+
+            def do_search(qtype, keyword):
+                key = (keyword or "").lower().strip()
+                out = []
+                shown = 0
+                for _, r in df.iterrows():
+                    if qtype and str(r.get("question_type","")) != str(qtype):
+                        continue
+                    text = (str(r.get("question","")) + " " + str(r.get("answer",""))).lower()
+                    if key and key not in text:
+                        continue
+                    out.append([r.get("question_type",""), r.get("question_focus",""), r.get("question",""), r.get("document_url","")])
+                    shown += 1
+                    if shown >= 30:
+                        break
+                return out, f"Showing **{len(out)}** rows."
+
+            btn_find.click(do_search, inputs=[qtype, keyword], outputs=[table, status])
+
+demo.launch()
