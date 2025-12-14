@@ -704,7 +704,19 @@ div[data-testid="stExpander"] details > div[role="group"]{
   transform: translateX(4px) !important;
   box-shadow: 0 2px 8px rgba(59,130,246,0.2) !important;
 }
-.stRadio > div > label > div { color: #1F2937 !important; }
+.stRadio > div > label > div { 
+  color: #000000 !important; 
+  font-weight: 500 !important;
+}
+.stRadio > div > label > div > div {
+  color: #000000 !important;
+}
+.stRadio > div > label > div p {
+  color: #000000 !important;
+}
+.stRadio > div > label span {
+  color: #000000 !important;
+}
 
 /* ---------- Animated triage chips ---------- */
 .triage-chips{
