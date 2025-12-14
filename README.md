@@ -258,33 +258,8 @@ This project uses the **MedQuAD** (Medical Question Answering Dataset):
 - Hugging Face API calls are secured with your token
 - No identifiable health information is logged
 
-## 🤝 Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
-
-## 📄 License
-
-This project is for educational purposes. Please ensure compliance with medical data regulations (HIPAA, GDPR) if deploying in production.
-
-## 🙏 Acknowledgments
-
-- MedQuAD dataset creators
+tors
 - Hugging Face for model hosting
 - Streamlit for the web framework
 - ChromaDB for vector storage
 
-## 📞 Support
-
-For issues or questions:
-
-- Open an issue on [GitHub](https://github.com/shanmukh1315/medical-triage-rag/issues)
-- Check existing documentation and discussions
-
----
-
-**Built with ❤️ for better healthcare accessibility**
