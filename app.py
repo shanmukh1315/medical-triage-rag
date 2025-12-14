@@ -19,18 +19,17 @@ SYS_RULES = (
     "Rules:\n"
     "1) Use ONLY the provided SOURCES. If insufficient, say you don't have enough information.\n"
     "2) Explain in plain English.\n"
-    "3) Include citations like [1], [2] matching the sources.\n"
-    f"4) End with this disclaimer exactly: {DISCLAIMER}\n"
+    "3) Do NOT diagnose or confirm what condition the user has.\n"
+    "4) Include citations like [1], [2] matching the sources.\n"
+    f"5) End with this disclaimer exactly: {DISCLAIMER}\n"
 )
 
 # ---------- Load data ----------
 df = pd.read_parquet(META_PATH)
 index = faiss.read_index(INDEX_PATH)
-
 embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
 def _clean(x) -> str:
-    """Convert None/NaN to empty string and ensure it's a plain str."""
     if x is None:
         return ""
     try:
@@ -55,7 +54,7 @@ def retrieve(query: str, k: int = TOP_K):
             "rank": rank,
             "score": float(scores[0][rank-1]),
             "question": _clean(r.get("question")),
-            "answer": _clean(r.get("answer")),  # ✅ never None
+            "answer": _clean(r.get("answer")),
             "question_type": _clean(r.get("question_type")),
             "question_focus": _clean(r.get("question_focus")),
             "source": _clean(r.get("document_source")) or "Unknown source",
@@ -65,13 +64,34 @@ def retrieve(query: str, k: int = TOP_K):
 
 def triage_hint(text: str) -> str:
     t = (text or "").lower()
-    emergency = ["chest pain","can't breathe","cannot breathe","blue lips","seizure","unconscious","stroke","severe bleeding"]
-    urgent = ["high fever","worsening","severe pain","persistent vomiting","dehydration","infant","newborn","pregnant"]
+    emergency = [
+        "chest pain", "can't breathe", "cannot breathe", "trouble breathing",
+        "blue lips", "seizure", "unconscious", "stroke", "severe bleeding"
+    ]
+    urgent = [
+        "high fever", "worsening", "severe pain", "persistent vomiting",
+        "dehydration", "infant", "newborn", "pregnant"
+    ]
     if any(x in t for x in emergency):
-        return "🚨 **Triage hint: EMERGENCY** (consider urgent medical evaluation)"
+        return "🚨 **Triage hint: EMERGENCY** (seek urgent medical evaluation)"
     if any(x in t for x in urgent):
         return "🟠 **Triage hint: URGENT** (consider same-day/soon medical advice)"
     return "🟢 **Triage hint: ROUTINE** (informational guidance; monitor and consult as needed)"
+
+def is_diagnosis_request(q: str) -> bool:
+    """
+    Detect questions that ask the model to diagnose/confirm a condition.
+    We intentionally keep this conservative (only strong diagnosis phrases).
+    """
+    t = (q or "").lower()
+    patterns = [
+        "do i have ", "do you think i have", "am i having", "am i having a",
+        "what do i have", "what's wrong with me", "what is wrong with me",
+        "can you diagnose", "diagnose me", "give me a diagnosis",
+        "is it pneumonia", "is it cancer", "is this pneumonia", "is this cancer",
+        "tell me what i have", "do i have pneumonia", "do i have covid"
+    ]
+    return any(p in t for p in patterns)
 
 def format_citations_and_passages(hits):
     citations_md = []
@@ -99,16 +119,23 @@ def generate_answer(user_q: str, hits):
         f"SOURCES:\n{sources_block}\n"
         f"QUESTION: {user_q}\n\n"
         "Write a short answer with citations like [1]. "
+        "Do NOT diagnose. If the user asks for diagnosis, refuse and suggest a safer re-phrasing. "
         f"End with: {DISCLAIMER}"
     )
 
     token = os.getenv("HF_TOKEN")
+    if not token:
+        return (
+            "⚠️ HF_TOKEN is missing. Add it in your Space Settings → Variables and secrets.\n\n"
+            f"{DISCLAIMER}"
+        )
+
     client = InferenceClient(model=MODEL_ID, token=token)
 
     try:
         out = client.text_generation(
             prompt,
-            max_new_tokens=230,
+            max_new_tokens=260,
             temperature=0.3,
             top_p=0.9,
             return_full_text=False
@@ -135,15 +162,19 @@ def log_feedback(kind: str, user_q: str, answer: str, hits):
 
 # ---------- UI ----------
 with gr.Blocks(title="Medical Q&A + RAG + Triage") as demo:
-    gr.Markdown(f"# Medical Q&A & Triage Assistant (RAG-grounded)\n\n**{DISCLAIMER}**")
+    gr.Markdown(
+        f"# Medical Q&A & Triage Assistant (RAG-grounded)\n\n"
+        f"**{DISCLAIMER}**\n\n"
+        f"✅ Uses retrieval (MedQuAD) + citations\n"
+        f"✅ Gives triage hint (Emergency/Urgent/Routine)\n"
+        f"✅ Refuses diagnosis requests\n"
+    )
 
-    state_last = gr.State({"q":"", "a":"", "hits":[]})
+    state_last = gr.State({"q": "", "a": "", "hits": []})
 
     with gr.Tabs():
         with gr.Tab("Chat"):
-            # ✅ IMPORTANT: no 'type=' param (your Gradio doesn't support it)
-            chat = gr.Chatbot(height=360)
-
+            chat = gr.Chatbot(height=360)  # compatible across HF Spaces Gradio versions
             user_q = gr.Textbox(
                 label="Ask a medical question (informational)",
                 placeholder="Example: cough and mild fever for 3 days..."
@@ -168,14 +199,41 @@ with gr.Blocks(title="Medical Q&A + RAG + Triage") as demo:
             def on_send(history, q):
                 q = (q or "").strip()
                 if not q:
-                    return history, "", "", "", {"q":"", "a":"", "hits":[]}
+                    return history, "", "", "", {"q": "", "a": "", "hits": []}
 
                 hits = retrieve(q, TOP_K)
                 tri = triage_hint(q)
                 c_md, p_md = format_citations_and_passages(hits)
-                ans = generate_answer(q, hits)
 
-                # ✅ messages-format history without needing Chatbot(type="messages")
+                # 1) EMERGENCY OVERRIDE (no LLM)
+                if "EMERGENCY" in tri:
+                    ans = (
+                        "🚨 **This may be an emergency.** If you have chest pain or trouble breathing, "
+                        "seek emergency care right now (call 911 / your local emergency number).\n\n"
+                        "If symptoms are severe or worsening, do not wait for online guidance.\n\n"
+                        f"{DISCLAIMER}"
+                    )
+
+                # 2) DIAGNOSIS REFUSAL (no LLM)
+                elif is_diagnosis_request(q):
+                    ans = (
+                        "I can’t diagnose or confirm what condition you have. "
+                        "But I *can* help with **general information** and **what to ask a clinician**.\n\n"
+                        "Try asking one of these instead:\n"
+                        "- “What is pneumonia and what are common symptoms?”\n"
+                        "- “What are red-flag symptoms that mean I should seek urgent care?”\n"
+                        "- “How is COVID vs flu vs cold generally distinguished by symptoms?”\n\n"
+                        "If you share **age range**, **how long symptoms have lasted**, **temperature**, and "
+                        "**any red flags** (trouble breathing, chest pain, confusion, dehydration), I can help you "
+                        "understand the *general possibilities* and when to seek care.\n\n"
+                        f"{DISCLAIMER}"
+                    )
+
+                # 3) Normal informational answer (use LLM with strict rules)
+                else:
+                    ans = generate_answer(q, hits)
+
+                # Chat history in messages dict format (required by your Space’s gradio)
                 if history is None:
                     history = []
                 history = history + [
@@ -190,14 +248,14 @@ with gr.Blocks(title="Medical Q&A + RAG + Triage") as demo:
             user_q.submit(on_send, inputs=[chat, user_q], outputs=[chat, triage, citations, passages, state_last])
 
             def on_clear():
-                return [], "", "", "", {"q":"", "a":"", "hits":[]}
+                return [], "", "", "", {"q": "", "a": "", "hits": []}
 
             btn_clear.click(on_clear, outputs=[chat, triage, citations, passages, state_last])
 
             def on_fb(kind, st):
                 if not st.get("q"):
                     return "Ask a question first."
-                return log_feedback(kind, st["q"], st.get("a",""), st.get("hits",[]))
+                return log_feedback(kind, st["q"], st.get("a", ""), st.get("hits", []))
 
             fb_up.click(lambda st: on_fb("helpful", st), inputs=[state_last], outputs=[fb_status])
             fb_down.click(lambda st: on_fb("not_helpful", st), inputs=[state_last], outputs=[fb_status])
@@ -212,7 +270,11 @@ with gr.Blocks(title="Medical Q&A + RAG + Triage") as demo:
             keyword = gr.Textbox(label="Search keyword", placeholder="e.g., diabetes, fever, asthma")
             btn_find = gr.Button("Search")
 
-            table = gr.Dataframe(headers=["question_type","question_focus","question","url"], interactive=False, wrap=True)
+            table = gr.Dataframe(
+                headers=["question_type", "question_focus", "question", "url"],
+                interactive=False,
+                wrap=True
+            )
             status = gr.Markdown()
 
             def do_search(qtype, keyword):
@@ -220,12 +282,17 @@ with gr.Blocks(title="Medical Q&A + RAG + Triage") as demo:
                 out = []
                 shown = 0
                 for _, r in df.iterrows():
-                    if qtype and str(r.get("question_type","")) != str(qtype):
+                    if qtype and str(r.get("question_type", "")) != str(qtype):
                         continue
-                    text = (str(r.get("question","")) + " " + str(r.get("answer",""))).lower()
+                    text = (str(r.get("question", "")) + " " + str(r.get("answer", ""))).lower()
                     if key and key not in text:
                         continue
-                    out.append([r.get("question_type",""), r.get("question_focus",""), r.get("question",""), r.get("document_url","")])
+                    out.append([
+                        r.get("question_type", ""),
+                        r.get("question_focus", ""),
+                        r.get("question", ""),
+                        r.get("document_url", "")
+                    ])
                     shown += 1
                     if shown >= 30:
                         break
@@ -233,9 +300,8 @@ with gr.Blocks(title="Medical Q&A + RAG + Triage") as demo:
 
             btn_find.click(do_search, inputs=[qtype, keyword], outputs=[table, status])
 
+# Launch
 try:
     demo.launch(ssr_mode=False)
 except TypeError:
-    # If your Gradio version doesn't support ssr_mode
     demo.launch()
-
