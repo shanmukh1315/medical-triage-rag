@@ -268,38 +268,45 @@ def llm_answer(question: str, hits: list[dict]) -> str:
     if not token:
         return "HF_TOKEN not set. Add it to your .env file (HF_TOKEN=hf_...)."
 
-    sources_block = ""
+    # Build context from retrieved passages with actual content
+    context_parts = []
     for h in hits:
-        a = (h.get("answer") or "")
-        sources_block += f"[{h['rank']}] {h.get('source','')} — {h.get('url','')}\n"
-        sources_block += a[:1200] + "\n\n"
+        q_text = (h.get("question") or "").strip()
+        a_text = (h.get("answer") or "").strip()
+        if a_text:
+            context_parts.append(f"[{h['rank']}] {q_text}\n{a_text[:600]}")
+    
+    context = "\n\n".join(context_parts)
 
-    sys_rules = (
-        "You are a medical information assistant. You are NOT a doctor.\n"
-        "Rules:\n"
-        "1) Use ONLY the provided SOURCES. If insufficient, say you don't have enough information.\n"
-        "2) Explain in plain English.\n"
-        "3) Include citations like [1], [2] matching the sources.\n"
-        f"4) End with this disclaimer exactly: {DISCLAIMER}\n"
-    )
+    # Simplified prompt that works better with Medical-Llama3
+    prompt = f"""Based on the medical information provided, answer this question: {question}
 
-    prompt = (
-        f"{sys_rules}\n\n"
-        f"SOURCES:\n{sources_block}\n"
-        f"QUESTION: {question}\n\n"
-        "Write a short answer with citations like [1]. "
-        f"End with: {DISCLAIMER}"
-    )
+Medical Information:
+{context}
+
+Answer the question by explaining what the condition is, what symptoms to watch for, and what actions to take (including when to seek medical care). Include citation numbers like [1] [2] when referencing the sources above.
+
+Answer:"""
 
     try:
         client = InferenceClient(model=model_id, token=token)
-        return client.text_generation(
+        response = client.text_generation(
             prompt,
-            max_new_tokens=240,
-            temperature=0.3,
-            top_p=0.9,
+            max_new_tokens=400,
+            temperature=0.5,
+            top_p=0.92,
             return_full_text=False,
+            repetition_penalty=1.15,
         )
+        
+        # Clean up response
+        response = response.strip()
+        
+        # Add disclaimer if not present
+        if DISCLAIMER not in response:
+            response = f"{response}\n\n{DISCLAIMER}"
+        
+        return response
     except HfHubHTTPError as e:
         msg = str(e)
         if "401" in msg or "Unauthorized" in msg:
@@ -429,46 +436,6 @@ def build_summary_markdown(complaint: str, flow: str, triage: str, triage_note: 
     lines.append(f"---\n{DISCLAIMER}")
     return "\n".join(lines)
 
-def render_printable_summary_card(complaint: str, triage: str, triage_note: str, answers_lines: list[str], citations_lines: list[str]) -> str:
-    complaint_html = _html.escape(complaint or "(not provided)")
-    triage_html = _html.escape(triage or "")
-    note_html = _html.escape(triage_note or "")
-
-    answers_html = _html.escape("\n".join(answers_lines) if answers_lines else "(no answers recorded)")
-    citations_html = _html.escape("\n".join(citations_lines) if citations_lines else "(no citations retrieved)")
-
-    return f"""
-    <div class="summary-card">
-      <div class="summary-title">📄 Printable Summary</div>
-
-      <div class="summary-grid">
-        <div class="summary-box">
-          <div class="summary-label">Complaint</div>
-          <div class="summary-value">{complaint_html}</div>
-        </div>
-        <div class="summary-box">
-          <div class="summary-label">Triage</div>
-          <div class="summary-value">{triage_html}</div>
-        </div>
-      </div>
-
-      <div class="summary-box" style="margin-top:12px;">
-        <div class="summary-label">Triage Note</div>
-        <div class="summary-value" style="font-weight:800; opacity:.92;">{note_html}</div>
-      </div>
-
-      <div class="summary-box" style="margin-top:12px;">
-        <div class="summary-label">Answers</div>
-        <pre class="summary-pre">{answers_html}</pre>
-      </div>
-
-      <div class="summary-box" style="margin-top:12px;">
-        <div class="summary-label">Citations</div>
-        <pre class="summary-pre">{citations_html}</pre>
-      </div>
-    </div>
-    """
-
 # -------------------------
 # Streamlit UI
 # -------------------------
@@ -481,6 +448,14 @@ st.set_page_config(
 
 st.markdown("""
 <style>
+/* ✅ Hide Streamlit "Show widget keys" labels globally */
+[data-testid="stWidgetKey"],
+[data-testid*="WidgetKey"],
+span[data-testid*="WidgetKey"],
+div[data-testid*="WidgetKey"]{
+  display:none !important;
+}
+
 /* ---------- App background ---------- */
 [data-testid="stAppViewContainer"]{
   background:
@@ -499,83 +474,6 @@ st.markdown("""
   padding-bottom: 2.2rem;
 }
 header { visibility: hidden; }
-
-/* ---------- Prevent hidden tab panels from affecting layout ---------- */
-div[data-baseweb="tab-panel"][aria-hidden="true"] { display: none !important; }
-div[data-baseweb="tab-panel"][hidden] { display: none !important; }
-
-/* ---------- Hide Streamlit "Show widget keys" overlay (key=...) ---------- */
-div[data-testid="stWidgetKey"],
-span[data-testid="stWidgetKey"],
-p[data-testid="stWidgetKey"],
-code[data-testid="stWidgetKey"],
-label[data-testid="stWidgetLabel"] code,
-div[data-testid="stExpander"] summary code,
-.stExpander code[class*="code"],
-[data-testid="stExpander"] code,
-.stExpander [data-testid="stCaption"],
-div[data-testid="stExpander"] + div[data-testid="stCaption"],
-.element-container code:contains("key="),
-[data-testid="stMarkdownContainer"] code,
-/* Target the specific expander key overlays */
-.stExpander summary::before,
-.stExpander summary::after,
-div[data-testid="stExpander"] summary span[style*="position: absolute"],
-div[data-testid="stExpander"] summary > span:first-child,
-div[data-testid="stExpander"] > div:first-child,
-.stExpander > div > div[data-testid="stCaption"],
-div[data-testid="stExpander"] div[data-testid="stCaption"]{
-  display: none !important;
-  visibility: hidden !important;
-  opacity: 0 !important;
-  position: absolute !important;
-  left: -9999px !important;
-  width: 0 !important;
-  height: 0 !important;
-  overflow: hidden !important;
-}
-
-/* Hide any caption/code that appears above expanders */
-.stExpander + [data-testid="stCaption"],
-[data-testid="stExpander"] + [data-testid="stCaption"],
-div[data-baseweb="popover"] [data-testid="stCaption"]{
-  display: none !important;
-}
-
-/* ---------- Streamlit Expanders - Black theme ---------- */
-.stExpander,
-div[data-testid="stExpander"]{
-  background: rgba(0,0,0,0.70) !important;
-  border: 1px solid rgba(255,255,255,0.15) !important;
-  border-radius: 14px !important;
-  box-shadow: 0 12px 26px rgba(0,0,0,0.50) !important;
-  margin-bottom: 16px !important;
-  backdrop-filter: blur(10px) !important;
-}
-
-.stExpander details > summary,
-div[data-testid="stExpander"] details > summary{
-  background: rgba(0,0,0,0.65) !important;
-  border: none !important;
-  border-radius: 14px !important;
-  padding: 12px 14px !important;
-  margin: 0 !important;
-  color: #E5E7EB !important;
-  font-weight: 700 !important;
-}
-
-.stExpander details[open] > summary,
-div[data-testid="stExpander"] details[open] > summary{
-  background: rgba(0,0,0,0.75) !important;
-  border-bottom: 1px solid rgba(255,255,255,0.10) !important;
-  border-radius: 14px 14px 0 0 !important;
-}
-
-.stExpander details > div[role="group"],
-div[data-testid="stExpander"] details > div[role="group"]{
-  padding-top: 10px !important;
-  background: rgba(0,0,0,0.60) !important;
-}
 
 /* ---------- Text visibility ---------- */
 .main h2, .main h3, .main h4, .main h5, .main h6 { color: #F9FAFB !important; }
@@ -661,9 +559,6 @@ div[data-testid="stExpander"] details > div[role="group"]{
   border-color: rgba(59,130,246,0.55) !important;
   box-shadow: 0 0 0 4px rgba(59,130,246,0.18) !important;
 }
-.stTextInput input::placeholder, .stTextArea textarea::placeholder{
-  color: rgba(17,24,39,0.45) !important;
-}
 
 /* ---------- Buttons ---------- */
 .stButton>button,
@@ -696,25 +591,10 @@ div[data-testid="stExpander"] details > div[role="group"]{
   border-radius: 10px !important;
   padding: 10px 14px !important;
   margin: 4px 0 !important;
-  transition: all 0.2s ease !important;
 }
-.stRadio > div > label:hover {
-  background: white !important;
-  border-color: rgba(59,130,246,0.5) !important;
-  transform: translateX(4px) !important;
-  box-shadow: 0 2px 8px rgba(59,130,246,0.2) !important;
-}
-.stRadio > div > label > div { 
-  color: #000000 !important; 
-  font-weight: 500 !important;
-}
-.stRadio > div > label > div > div {
-  color: #000000 !important;
-}
-.stRadio > div > label > div p {
-  color: #000000 !important;
-}
-.stRadio > div > label span {
+.stRadio > div > label > div,
+.stRadio > div > label span,
+.stRadio > div > label p{
   color: #000000 !important;
 }
 
@@ -746,35 +626,20 @@ div[data-testid="stExpander"] details > div[role="group"]{
 .chip.routine.active{
   background: rgba(34,197,94,.14);
   border-color: rgba(34,197,94,.35);
-  animation: pulseGreen 1.6s ease-in-out infinite;
 }
-.chip.routine.active .dot{ background: rgba(34,197,94,.95); box-shadow: 0 0 12px rgba(34,197,94,.8); }
-@keyframes pulseGreen{
-  0%,100%{ box-shadow: 0 0 14px rgba(34,197,94,.22); }
-  50%{ box-shadow: 0 0 28px rgba(34,197,94,.55); }
-}
+.chip.routine.active .dot{ background: rgba(34,197,94,.95); }
 .chip.urgent.active{
   background: rgba(245,158,11,.14);
   border-color: rgba(245,158,11,.35);
-  animation: pulseAmber 1.6s ease-in-out infinite;
 }
-.chip.urgent.active .dot{ background: rgba(245,158,11,.95); box-shadow: 0 0 12px rgba(245,158,11,.8); }
-@keyframes pulseAmber{
-  0%,100%{ box-shadow: 0 0 14px rgba(245,158,11,.22); }
-  50%{ box-shadow: 0 0 28px rgba(245,158,11,.55); }
-}
+.chip.urgent.active .dot{ background: rgba(245,158,11,.95); }
 .chip.emergency.active{
   background: rgba(239,68,68,.14);
   border-color: rgba(239,68,68,.35);
-  animation: pulseRed 1.2s ease-in-out infinite;
 }
-.chip.emergency.active .dot{ background: rgba(239,68,68,.95); box-shadow: 0 0 12px rgba(239,68,68,.85); }
-@keyframes pulseRed{
-  0%,100%{ box-shadow: 0 0 16px rgba(239,68,68,.25); }
-  50%{ box-shadow: 0 0 34px rgba(239,68,68,.65); }
-}
+.chip.emergency.active .dot{ background: rgba(239,68,68,.95); }
 
-/* ---------- Custom accordions (no Streamlit expander => no "key=..." overlap) ---------- */
+/* ---------- Custom accordions ---------- */
 .acc{
   background: rgba(0,0,0,0.55);
   border: 1px solid rgba(255,255,255,0.15);
@@ -800,7 +665,6 @@ div[data-testid="stExpander"] details > div[role="group"]{
 .acc .acc-icon{
   opacity: .7;
   font-weight: 900;
-  transform: rotate(0deg);
   transition: transform .18s ease;
 }
 .acc[open] .acc-icon{ transform: rotate(180deg); }
@@ -808,11 +672,16 @@ div[data-testid="stExpander"] details > div[role="group"]{
   padding: 14px;
   border-top: 1px solid rgba(255,255,255,0.10);
 }
-.cite-item{ padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.08); }
-.cite-item:last-child{ border-bottom: 0; }
-.cite-head{ font-weight: 800; color: rgba(243,244,246,0.95); }
+
+.cite-item{
+  padding: 10px 12px;
+  margin: 10px 0;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 12px;
+}
+.cite-head{ font-weight: 900; color: #F9FAFB; }
 .cite-num{ opacity: .9; margin-right: 6px; }
-.cite-url{ margin-top: 6px; }
 .cite-link{ color: rgba(147,197,253,0.95); text-decoration: underline; word-break: break-word; }
 .muted{ opacity: .75; }
 
@@ -823,60 +692,6 @@ div[data-testid="stExpander"] details > div[role="group"]{
 .passage-type{ opacity: .8; font-weight: 800; }
 .passage-q{ margin-top: 6px; font-weight: 800; opacity: .95; }
 .passage-a{ margin-top: 8px; opacity: .92; line-height: 1.45; }
-
-/* ---------- Printable summary card ---------- */
-.summary-card{
-  margin-top: 18px;
-  background: rgba(255,255,255,0.06);
-  border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 18px;
-  padding: 18px;
-  box-shadow: 0 14px 34px rgba(0,0,0,0.32);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-}
-.summary-title{
-  font-size: 1.25rem;
-  font-weight: 950;
-  color: #F9FAFB;
-  margin-bottom: 10px;
-}
-.summary-grid{
-  display:grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-@media (max-width: 900px){
-  .summary-grid{ grid-template-columns: 1fr; }
-}
-.summary-box{
-  background: rgba(255,255,255,0.05);
-  border: 1px solid rgba(255,255,255,0.10);
-  border-radius: 14px;
-  padding: 14px;
-}
-.summary-label{
-  opacity:.75;
-  font-weight: 900;
-  font-size: .85rem;
-  margin-bottom: 6px;
-}
-.summary-value{
-  font-weight: 900;
-  color: #F9FAFB;
-  word-break: break-word;
-}
-.summary-pre{
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  background: rgba(0,0,0,0.18);
-  border: 1px solid rgba(255,255,255,0.10);
-  border-radius: 12px;
-  padding: 12px;
-  margin: 0;
-  color: rgba(243,244,246,0.95);
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -999,24 +814,60 @@ with tabs[0]:
             hits_for_summary = hits
 
             if hits:
-                with st.expander("📖 Citations & Sources", expanded=True):
-                    for h in hits:
-                        st.markdown(f"**[{h['rank']}]** {h['source']}")
-                        st.caption(h['url'])
-
-                with st.expander("📄 Retrieved Passages", expanded=False):
-                    for h in hits:
-                        st.markdown(f"**[{h['rank']}] {h['question_type']}**")
-                        st.markdown(f"*{h['question']}*")
-                        st.write((h["answer"] or "")[:900] + "…")
-                        st.markdown("---")
+                st.markdown("### 📖 Citations & Sources")
+                
+                # Create citations content as black card
+                citations_html = """
+                <div style="
+                    background: rgba(0,0,0,0.70);
+                    border: 1px solid rgba(255,255,255,0.15);
+                    border-radius: 14px;
+                    padding: 20px;
+                    margin: 10px 0 20px 0;
+                    box-shadow: 0 12px 26px rgba(0,0,0,0.50);
+                ">
+                """
+                
+                for h in hits:
+                    rank = h.get("rank", 0)
+                    source = h.get("source", "").strip() or "Source"
+                    url = h.get("url", "").strip()
+                    
+                    citations_html += f'<p style="color: #FFFFFF; margin: 10px 0;"><strong>[{rank}] {source}</strong></p>'
+                    if url:
+                        citations_html += f'<p style="margin: 5px 0 15px 0;"><a href="{url}" target="_blank" style="color: #60A5FA; text-decoration: none;">{url}</a></p>'
+                    if rank < len(hits):
+                        citations_html += '<hr style="border: none; border-top: 1px solid rgba(255,255,255,0.1); margin: 15px 0;">'
+                
+                citations_html += "</div>"
+                st.markdown(citations_html, unsafe_allow_html=True)
 
                 st.markdown("### 🤖 AI-Generated Summary")
-                st.write(llm_answer(query, hits))
+                
+                with st.spinner("Generating personalized summary..."):
+                    answer = llm_answer(S["complaint"], hits)
+                
+                # Display answer in black card with white text
+                answer_escaped = _html.escape(answer).replace('\n', '<br>')
+                answer_html = f"""
+                <div style="
+                    background: rgba(0,0,0,0.70);
+                    border: 1px solid rgba(255,255,255,0.15);
+                    border-radius: 14px;
+                    padding: 20px;
+                    margin: 10px 0 20px 0;
+                    box-shadow: 0 12px 26px rgba(0,0,0,0.50);
+                    color: #FFFFFF;
+                    line-height: 1.6;
+                    white-space: pre-wrap;
+                ">
+                    {answer_escaped}
+                </div>
+                """
+                st.markdown(answer_html, unsafe_allow_html=True)
             else:
                 st.info("No passages retrieved (or Chroma needs rebuild).")
 
-            # -------- Download Summary --------
             summary_md = build_summary_markdown(
                 complaint=S["complaint"],
                 flow=S["flow"],
@@ -1034,7 +885,6 @@ with tabs[0]:
                 file_name=filename,
                 mime="text/markdown",
             )
-            st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
 
             st.markdown(f"**{DISCLAIMER}**")
 
@@ -1051,12 +901,56 @@ with tabs[1]:
 
         if hits:
             st.markdown("### 📚 Sources")
-            st.markdown(render_accordion("Sources (click to expand)", render_citations_html(hits), open_by_default=True), unsafe_allow_html=True)
+            
+            # Create citations content as black card (matching triage intake)
+            citations_html = """
+            <div style="
+                background: rgba(0,0,0,0.70);
+                border: 1px solid rgba(255,255,255,0.15);
+                border-radius: 14px;
+                padding: 20px;
+                margin: 10px 0 20px 0;
+                box-shadow: 0 12px 26px rgba(0,0,0,0.50);
+            ">
+            """
+            
+            for h in hits:
+                rank = h.get("rank", 0)
+                source = h.get("source", "").strip() or "Source"
+                url = h.get("url", "").strip()
+                
+                citations_html += f'<p style="color: #FFFFFF; margin: 10px 0;"><strong>[{rank}] {source}</strong></p>'
+                if url:
+                    citations_html += f'<p style="margin: 5px 0 15px 0;"><a href="{url}" target="_blank" style="color: #60A5FA; text-decoration: none;">{url}</a></p>'
+                if rank < len(hits):
+                    citations_html += '<hr style="border: none; border-top: 1px solid rgba(255,255,255,0.1); margin: 15px 0;">'
+            
+            citations_html += "</div>"
+            st.markdown(citations_html, unsafe_allow_html=True)
 
             st.markdown("### 🤖 Answer")
+            
             with st.spinner("Generating answer..."):
                 answer = llm_answer(q, hits)
-            st.info(answer)
+            
+            # Display answer in black card with white text (escape HTML in answer text)
+            answer_escaped = _html.escape(answer).replace('\n', '<br>')
+            answer_html = f"""
+            <div style="
+                background: rgba(0,0,0,0.70);
+                border: 1px solid rgba(255,255,255,0.15);
+                border-radius: 14px;
+                padding: 20px;
+                margin: 10px 0 20px 0;
+                box-shadow: 0 12px 26px rgba(0,0,0,0.50);
+                color: #FFFFFF;
+                line-height: 1.6;
+                white-space: pre-wrap;
+            ">
+                {answer_escaped}
+            </div>
+            """
+            st.markdown(answer_html, unsafe_allow_html=True)
         else:
             st.info("No hits retrieved.")
         st.caption(DISCLAIMER)
